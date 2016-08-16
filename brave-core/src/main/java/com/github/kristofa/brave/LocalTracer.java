@@ -83,7 +83,10 @@ public abstract class LocalTracer extends AnnotationSubmitter {
     }
 
     private SpanId getNewSpanId() {
-        Span parentSpan = spanAndEndpoint().state().getCurrentServerSpan().getSpan();
+        Span parentSpan = spanAndEndpoint().state().getCurrentLocalSpan();
+        if (parentSpan == null) {
+            parentSpan = spanAndEndpoint().state().getCurrentServerSpan().getSpan();
+        }
         long newSpanId = randomGenerator().nextLong();
         SpanId.Builder builder = SpanId.builder().spanId(newSpanId);
         if (parentSpan == null) return builder.build(); // new trace
@@ -129,19 +132,21 @@ public abstract class LocalTracer extends AnnotationSubmitter {
      * Completes the span, assigning the most precise duration possible.
      */
     public void finishSpan() {
-        long endTick = System.nanoTime();
-
         Span span = spanAndEndpoint().span();
         if (span == null) return;
 
-        Long startTick = span.startTick;
-        final long duration;
-        if (startTick != null) {
-            duration = Math.max(1L, (endTick - startTick) / 1000L);
+        internalFinishSpan(span, getDuration(span));
+    }
+
+    private long getDuration(Span span) {
+        Long startTick = span.startTick; // volatile read
+        if (startTick == null) {
+            synchronized (span) {
+                return currentTimeMicroseconds() - span.getTimestamp();
+            }
         } else {
-            duration = currentTimeMicroseconds() - span.getTimestamp();
+            return Math.max(1L, (System.nanoTime() - startTick) / 1000L);
         }
-        finishSpan(duration);
     }
 
     /**
@@ -151,6 +156,10 @@ public abstract class LocalTracer extends AnnotationSubmitter {
         Span span = spanAndEndpoint().span();
         if (span == null) return;
 
+        internalFinishSpan(span, duration);
+    }
+
+    private void internalFinishSpan(Span span, long duration) {
         synchronized (span) {
             span.setDuration(duration);
             spanCollector().collect(span);
